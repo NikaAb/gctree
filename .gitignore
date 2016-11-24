@@ -1,2 +1,3 @@
-# ignore mac finder system file
 .DS_Store
+.ipynb_checkpoints
+*.pyc
