@@ -67,15 +67,15 @@ def simulate(b, t):
 
 def main():
     b_true = .7
-    t = 3
+    t = 5
     ntrees = 100
     x_counter = Counter([simulate(b_true, t) for _ in range(ntrees)])
-    print 'simulating {0} trees run for {1} time steps with branching probability {2}'.format(ntrees, t, b_true)
-    print 'branching probability inference results'
+    print '\nsimulating {0} trees run for {1} time steps with branching probability {2}'.format(ntrees, t, b_true)
+    print '\nbranching probability inference results'
 
     timer = time.time()
     result = minimize(l, (logit(.5),), args=(x_counter, t, -1), jac=True, tol=.001)
-    print '    recursion, memoization, and analytic gradient: {0} ({1} sec)'.format(expit(result.x[0]), time.time() - timer)
+    print '\n    scipy: {0:.2f} ({1:.2f} sec)'.format(expit(result.x[0]), time.time() - timer)
     assert result.success
 
     # now let's see how long tensorflow takes to make the likelihood this small
@@ -83,12 +83,14 @@ def main():
     logit_b = tf.Variable(0.)
     T = build_tensor(max(x_counter.keys()), t, logit_b, logit=True)
     y = -sum(x_counter[x]*tf.log(T[t,x]) for x in x_counter)
+    time_build = time.time() - timer
     sess = tf.Session()
     sess.run(tf.initialize_all_variables())
     train_step = tf.train.GradientDescentOptimizer(0.001).minimize(y)
     while sess.run(y) > result.fun:
         sess.run(train_step)
-    print '    using tensorflow: {0} ({1} sec)'.format(expit(sess.run(logit_b)), time.time() - timer)
+    time_run = time.time() - timer - time_build
+    print '\n    tensorflow: {0:.2f} ({1:.2f} sec to build, {2:.2f} sec to run)'.format(expit(sess.run(logit_b)), time_build, time_run)
 
 if __name__ == "__main__":
     main()
