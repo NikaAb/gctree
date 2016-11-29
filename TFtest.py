@@ -1,10 +1,10 @@
 #! /usr/bin/env python
 
 import tensorflow as tf
-from scipy import array
-from scipy.special import logit, expit
-from scipy.optimize import minimize
-from math import log, exp
+#from scipy import array
+#from scipy.special import logit, expit
+#from scipy.optimize import minimize
+from math import log
 from collections import Counter
 import random, time
 
@@ -18,7 +18,7 @@ def build_tensor(x, t, b, logit=False):
     for t_ in range(1, t+1):
         T.append([  (1-b if x_==0 else 0)
                   + 2*b*sum(T[-1][x_-x__]*T[-1][x__] for x__ in range(x_//2))
-                  + (b*T[-1][x_/2]**2 if x_ % 2 == 0 else 0)
+                  + (b*T[-1][x_//2]**2 if x_ % 2 == 0 else 0)
                   for x_ in range(x+1)
                  ])
     return tf.pack(T)
@@ -45,13 +45,14 @@ def L(x, t, b):
             memo[(x, t, b)] = (0., [0.])
     return memo[(x, t, b)]
 
-def l((logit_b,), x_counter, t, sign=1):
+def l(params, x_counter, t, sign=1):
     """log likelihood for list of trees"""
-    b = expit(logit_b)
+    b = expit(params[0])
     result = 0.
     dresultdb = 0.
     for x in x_counter:
         f, gradf = L(x, t, b)
+        print(x,t, f, logit_b)
         result += sign*x_counter[x]*log(f)
         dresultdb += sign*x_counter[x]*gradf[0]/f
     return result, array([dresultdb])
@@ -70,27 +71,33 @@ def main():
     t = 5
     ntrees = 100
     x_counter = Counter([simulate(b_true, t) for _ in range(ntrees)])
-    print '\nsimulating {0} trees run for {1} time steps with branching probability {2}'.format(ntrees, t, b_true)
-    print '\nbranching probability inference results'
+    print('\nsimulating {0} trees run for {1} time steps with branching probability {2:.2f}'.format(ntrees, t, b_true))
+    print('\nbranching probability inference results')
 
     timer = time.time()
     result = minimize(l, (logit(.5),), args=(x_counter, t, -1), jac=True, tol=.001)
-    print '\n    scipy: {0:.2f} ({1:.2f} sec)'.format(expit(result.x[0]), time.time() - timer)
+    print('\n         scipy: {0:.2f} ({1:.2f} sec)'.format(expit(result.x[0]), time.time() - timer))
     assert result.success
 
     # now let's see how long tensorflow takes to make the likelihood this small
     timer = time.time()
     logit_b = tf.Variable(0.)
-    T = build_tensor(max(x_counter.keys()), t, logit_b, logit=True)
-    y = -sum(x_counter[x]*tf.log(T[t,x]) for x in x_counter)
+    x_max = max(x_counter.keys())
+    T = build_tensor(x_max, t, logit_b, logit=True)
+    # now we get an index array into T[t,:], based on the data
+    w = tf.constant([x_counter[x] for x in range(x_max+1)], dtype=tf.float32)
+    #y = -tf.reduce_sum(tf.multiply(w, tf.log(T[t,:])))
+    y = -tf.einsum('i,i->', w, tf.log(T[t,:]))
+    #y = -sum(x_counter[x]*tf.log(T[t,x]) for x in x_counter)
     time_build = time.time() - timer
     sess = tf.Session()
     sess.run(tf.initialize_all_variables())
     train_step = tf.train.GradientDescentOptimizer(0.001).minimize(y)
-    while sess.run(y) > result.fun:
+    #while sess.run(y) > result.fun:
+    for _ in range(100):
         sess.run(train_step)
     time_run = time.time() - timer - time_build
-    print '\n    tensorflow: {0:.2f} ({1:.2f} sec to build, {2:.2f} sec to run)'.format(expit(sess.run(logit_b)), time_build, time_run)
+    print('    tensorflow: {0:.2f} ({1:.2f} sec to build, {2:.2f} sec to run)\n'.format(expit(sess.run(logit_b)), time_build, time_run))
 
 if __name__ == "__main__":
     main()
