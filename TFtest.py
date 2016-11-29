@@ -1,27 +1,63 @@
 #! /usr/bin/env python
 
-# memoize
-f_hash = {}
-def f(x, t, b):
-    if (x,t,b) not in f_hash:
-        if x==1 and t==0:
-             f_hash[(x,t,b)] = 1.
-        elif x==0 and t==1:
-             f_hash[(x,t,b)] = 1 - b
-        elif x==2 and t==1:
-             f_hash[(x,t,b)] = b
-        elif x==0 and t>1:
-             f_hash[(x,t,b)] = tf.add(tf.sub(1.,b), tf.mul(b, tf.square(f(0, t-1, b))))
-             #f_hash[(x,t,b)] = (1-b) + b*f(0, t-1, b)**2
-        elif x>0 and t>0:
-             f_hash[(x,t,b)] = tf.mul(b, sum(tf.mul(f(x-x_, t-1, b), f(x_, t-1, b)) for x_ in range(x+1)))
-             #f_hash[(x,t,b)] = b*sum(f(x-x_, t-1, b)*f(x_, t-1, b) for x_ in range(x+1))
-        else:
-             f_hash[(x,t,b)] = 0.
-    return f_hash[(x,t,b)]
+import tensorflow as tf
+from scipy import array
+from scipy.special import logit, expit
+from scipy.optimize import minimize
+from math import log, exp
+from collections import Counter
+import random, time
 
-import random
+def build_tensor(x, t, b, logit=False):
+    """generate tensorflow graph, given max x and max t"""
+    if logit:
+        b = tf.sigmoid(b)
+    # t=0 slice
+    T = [[1. if x_==1 else 0. for x_ in range(x+1)]]
+    # add subsequent time slices
+    for t_ in range(1, t+1):
+        T.append([  (1-b if x_==0 else 0)
+                  + 2*b*sum(T[-1][x_-x__]*T[-1][x__] for x__ in range(x_//2))
+                  + (b*T[-1][x_/2]**2 if x_ % 2 == 0 else 0)
+                  for x_ in range(x+1)
+                 ])
+    return tf.pack(T)
+
+memo = {}
+def L(x, t, b):
+    """recursive likelihood (with gradient), for benchmarking tensorflow"""
+    if (x, t, b) not in memo:
+        if t==0 and x==1:
+            memo[(x, t, b)] = (1., [0.])
+        elif t>0 and x>=0:
+            f, dfdb = ((1-b, -1) if x==0 else (0, 0))
+            for x_ in range(x//2):
+                neighbor1_f, neighbor1_gradf = L(x-x_, t-1, b)
+                neighbor2_f, neighbor2_gradf = L(x_, t-1, b)
+                f += 2*b*neighbor1_f*neighbor2_f
+                dfdb += 2*neighbor1_f*neighbor2_f + 2*b*neighbor1_gradf[0]*neighbor2_f + 2*b*neighbor1_f*neighbor2_gradf[0]
+            if x % 2 == 0:
+                neighbor_f, neighbor_gradf = L(x/2, t-1, b)
+                f += b*neighbor_f**2
+                dfdb += neighbor_f**2 + b*2*neighbor_f*neighbor_gradf[0]
+            memo[(x, t, b)] = (f, [dfdb])
+        else:
+            memo[(x, t, b)] = (0., [0.])
+    return memo[(x, t, b)]
+
+def l((logit_b,), x_counter, t, sign=1):
+    """log likelihood for list of trees"""
+    b = expit(logit_b)
+    result = 0.
+    dresultdb = 0.
+    for x in x_counter:
+        f, gradf = L(x, t, b)
+        result += sign*x_counter[x]*log(f)
+        dresultdb += sign*x_counter[x]*gradf[0]/f
+    return result, array([dresultdb])
+
 def simulate(b, t):
+    """simulate tree"""
     x = 1
     t_ = 0
     while t_ < t and x > 0:
@@ -29,55 +65,30 @@ def simulate(b, t):
         t_ += 1
     return x
 
-import tensorflow as tf
-import ad, scipy, scipy.optimize
+def main():
+    b_true = .7
+    t = 3
+    ntrees = 100
+    x_counter = Counter([simulate(b_true, t) for _ in range(ntrees)])
+    print 'simulating {0} trees run for {1} time steps with branching probability {2}'.format(ntrees, t, b_true)
+    print 'branching probability inference results'
 
+    timer = time.time()
+    result = minimize(l, (logit(.5),), args=(x_counter, t, -1), jac=True, tol=.001)
+    print '    recursion, memoization, and analytic gradient: {0} ({1} sec)'.format(expit(result.x[0]), time.time() - timer)
+    assert result.success
 
+    # now let's see how long tensorflow takes to make the likelihood this small
+    timer = time.time()
+    logit_b = tf.Variable(0.)
+    T = build_tensor(max(x_counter.keys()), t, logit_b, logit=True)
+    y = -sum(x_counter[x]*tf.log(T[t,x]) for x in x_counter)
+    sess = tf.Session()
+    sess.run(tf.initialize_all_variables())
+    train_step = tf.train.GradientDescentOptimizer(0.001).minimize(y)
+    while sess.run(y) > result.fun:
+        sess.run(train_step)
+    print '    using tensorflow: {0} ({1} sec)'.format(expit(sess.run(logit_b)), time.time() - timer)
 
-memo = {}
-def power(x, n):
-    assert n >= 0 and type(n) == int
-    if (x, n) not in memo:
-        if n == 0:
-            memo[(x, n)] = 1
-        else:
-            memo[(x, n)] = x*power(x, n-1)
-    return memo[(x, n)]
-
-x = ad.adnumber(1.2, 'x')
-y = x**2 #power(x, 2)
-print y
-print y.gradient([x])
-
-
-
-b_true = .7
-t = 10
-x_ = [simulate(b_true, t) for _ in range(1000)]
-
-
-#from ad.admath import *
-#cost = lambda params: -sum(log(f(x,t,*params)) for x in x_)
-#cost_jac, cost_hes = ad.gh(cost)
-
-#print 'gradient error:', scipy.optimize.check_grad(cost, cost_jac, [.5])
-
-#print scipy.optimize.minimize(cost, [.5], bounds=((0.001,.999),), jac=cost_jac, tol=1e-9)#, hess=cost_hes)
-
-
-
-b = tf.Variable(1.)
-y = -sum(f(x,t,tf.sigmoid(b)) for x in x_)
-
-#b = tf.Variable(.5)
-#y = -sum(f(x,t,b) for x in x_)
-
-train_step = tf.train.GradientDescentOptimizer(0.5).minimize(y)
-
-sess = tf.Session()
-sess.run(tf.initialize_all_variables())
-
-print sess.run(b), -sess.run(y)
-for _ in range(1000):
-    sess.run(train_step)
-    print sess.run(b), -sess.run(y)
+if __name__ == "__main__":
+    main()
